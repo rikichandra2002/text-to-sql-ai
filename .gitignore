@@ -1,0 +1,18 @@
+# Virtual environment
+venv/
+
+# Environment variables / API keys
+.env
+
+# Python cache
+__pycache__/
+*.pyc
+
+# ChromaDB generated files
+chroma_db/
+
+# Streamlit cache
+.streamlit/
+
+# IDE files
+.vscode/
