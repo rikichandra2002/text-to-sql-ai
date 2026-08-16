@@ -3,6 +3,7 @@ load_dotenv()
 
 import os
 import sqlite3
+import hashlib
 import streamlit as st
 import sqlglot
 from sqlglot import exp
@@ -29,6 +30,35 @@ chroma_client = chromadb.PersistentClient(
 schema_collection = chroma_client.get_or_create_collection(
     name="database_schema"
 )
+
+metadata_collection = chroma_client.get_or_create_collection(
+    name="database_metadata"
+)
+
+# ==========================================
+# Get Metadata Collection for Uploaded DB
+# ==========================================
+
+def get_uploaded_metadata_collection(database_path):
+
+    # Read database file
+    with open(database_path, "rb") as f:
+        database_bytes = f.read()
+
+    # Create a unique hash for this database
+    database_hash = hashlib.md5(
+        database_bytes
+    ).hexdigest()[:12]
+
+    collection_name = (
+        f"database_metadata_{database_hash}"
+    )
+
+    collection = chroma_client.get_or_create_collection(
+        name=collection_name
+    )
+
+    return collection
 # ==========================================
 # Retrieve Relevant Schema from ChromaDB
 # ==========================================
@@ -81,25 +111,94 @@ def retrieve_relevant_schema(question, n_results=3):
         return None
 
     return "\n\n".join(relevant_documents)
+
 # ==========================================
-# Function to Get Gemini Response with RAG
+# Retrieve Relevant Metadata from ChromaDB
 # ==========================================
 
-def get_gemini_response(question, prompt):
+def retrieve_relevant_metadata(
+    question,
+    metadata_collection,
+    n_results=3
+):
 
-    # Retrieve relevant schema from ChromaDB
-    relevant_schema = retrieve_relevant_schema(question)
-    if relevant_schema is None:
+    results = metadata_collection.query(
+        query_texts=[question],
+        n_results=n_results,
+        include=[
+            "documents",
+            "metadatas",
+            "distances"
+        ]
+    )
+
+    documents = results.get("documents", [[]])[0]
+    metadatas = results.get("metadatas", [[]])[0]
+    distances = results.get("distances", [[]])[0]
+
+    if not documents:
         return None
+
+    RELEVANCE_THRESHOLD = 1.8
+
+    relevant_documents = []
+
+    print("\n========== METADATA RETRIEVAL ==========")
+    print("User Question:", question)
+
+    for i, document in enumerate(documents):
+
+        table_name = metadatas[i].get("table_name")
+        distance = distances[i]
+
+        print(f"\nResult {i + 1}")
+        print("Table:", table_name)
+        print("Distance:", distance)
+
+        if distance <= RELEVANCE_THRESHOLD:
+
+            print("Status: RELEVANT")
+
+            relevant_documents.append(document)
+
+        else:
+
+            print("Status: NOT RELEVANT")
+
+    print("========================================\n")
+
+    if not relevant_documents:
+        return None
+
+    return "\n\n".join(relevant_documents)
+# ==========================================
+# Function to Get Gemini Response with Metadata RAG
+# ==========================================
+
+def get_gemini_response(
+    question,
+    prompt,
+    metadata_collection
+):
+
+    # Retrieve relevant metadata from ChromaDB
+    relevant_metadata = retrieve_relevant_metadata(
+    question,
+    metadata_collection
+)
+
+    if relevant_metadata is None:
+        return None
+
     # Generate SQL using Gemini
     response = client.models.generate_content(
         model="gemini-3.6-flash",
         contents=[
             prompt[0],
             f"""
-Relevant database schema retrieved from the schema knowledge base:
+Relevant database metadata retrieved from the metadata knowledge base:
 
-{relevant_schema}
+{relevant_metadata}
 
 User question:
 
@@ -109,6 +208,11 @@ User question:
     )
 
     return response.text.strip()
+
+# ==========================================
+# Validate Generated SQL Query
+# ==========================================
+
 def validate_sql_query(sql):
 
     try:
@@ -155,6 +259,134 @@ def read_sql_query(sql, db):
 
     return rows
 
+# ==========================================
+# Build Metadata for Uploaded Database
+# ==========================================
+
+def build_uploaded_database_metadata(db):
+
+    conn = sqlite3.connect(db)
+    cursor = conn.cursor()
+
+    tables = cursor.execute(
+        """
+        SELECT name
+        FROM sqlite_master
+        WHERE type = 'table'
+        AND name NOT LIKE 'sqlite_%'
+        ORDER BY name
+        """
+    ).fetchall()
+
+    metadata = {}
+
+    for table in tables:
+
+        table_name = table[0]
+
+        columns = cursor.execute(
+            f"PRAGMA table_info('{table_name}')"
+        ).fetchall()
+
+        table_metadata = {
+            "table_name": table_name,
+            "description": "",
+            "keywords": [
+                table_name.lower()
+            ],
+            "columns": {},
+            "foreign_keys": []
+        }
+
+        # Column metadata
+        for column in columns:
+
+            column_name = column[1]
+            data_type = column[2]
+            primary_key = bool(column[5])
+
+            table_metadata["columns"][column_name] = {
+                "type": data_type,
+                "primary_key": primary_key
+            }
+
+            table_metadata["keywords"].append(
+                column_name.lower()
+            )
+
+        # Foreign keys
+        foreign_keys = cursor.execute(
+            f"PRAGMA foreign_key_list('{table_name}')"
+        ).fetchall()
+
+        for foreign_key in foreign_keys:
+
+            table_metadata["foreign_keys"].append({
+                "column": foreign_key[3],
+                "references_table": foreign_key[2],
+                "references_column": foreign_key[4]
+            })
+
+        metadata[table_name] = table_metadata
+
+    conn.close()
+
+    return metadata
+
+# ==========================================
+# Create Metadata Documents
+# ==========================================
+
+def create_uploaded_metadata_documents(metadata):
+
+    documents = []
+
+    for table_name, table_info in metadata.items():
+
+        document = f"Table: {table_name}\n"
+
+        document += (
+            f"Description: "
+            f"{table_info['description']}\n"
+        )
+
+        document += (
+            f"Keywords: "
+            f"{', '.join(table_info['keywords'])}\n"
+        )
+
+        document += "\nColumns:\n"
+
+        for column_name, column_info in table_info["columns"].items():
+
+            document += (
+                f"- {column_name} "
+                f"(Type: {column_info['type']}, "
+                f"Primary Key: {column_info['primary_key']})\n"
+            )
+
+        document += "\nForeign Keys:\n"
+
+        if table_info["foreign_keys"]:
+
+            for foreign_key in table_info["foreign_keys"]:
+
+                document += (
+                    f"- {foreign_key['column']} → "
+                    f"{foreign_key['references_table']}."
+                    f"{foreign_key['references_column']}\n"
+                )
+
+        else:
+
+            document += "- None\n"
+
+        documents.append({
+            "table_name": table_name,
+            "text": document
+        })
+
+    return documents
 # ==========================================
 # Function to Get Detailed Database Schema
 # ==========================================
@@ -227,13 +459,7 @@ def format_schema_for_prompt(schema):
         schema_text += "\n"
 
     return schema_text
-# ==========================================
-# Get Database Schema
-# ==========================================
 
-database_schema = get_database_schema("student.db")
-
-schema_text = format_schema_for_prompt(database_schema)
 # ==========================================
 # Text-to-SQL Prompt
 # ==========================================
@@ -244,7 +470,7 @@ prompt = [
 
     Your task is to convert the user's natural language question into a valid
     SQLite SQL query using ONLY the tables and columns provided in the
-    relevant database schema retrieved from the schema knowledge base.
+    relevant database metadata retrieved from the metadata knowledge base.
 
     IMPORTANT RULES:
 
@@ -253,26 +479,25 @@ prompt = [
     3. Do not use Markdown code fences such as ```sql or ``` around the query.
     4. Do not include the word "SQL" before or after the query.
     5. Generate only valid SQLite SQL syntax.
-    6. Use only tables that exist in the provided database schema.
-    7. Use only columns that exist in the provided database schema.
+    6. Use only tables that exist in the provided metadata.
+    7. Use only columns that exist in the provided metadata.
     8. Do not invent tables, columns, relationships, or values.
     9. Make sure the generated query directly answers the user's question.
     10. Return exactly ONE SQL statement.
     11. Return a SELECT query only.
     12. Do not perform INSERT, UPDATE, DELETE, DROP, ALTER, CREATE,
         or any other database modification operation.
-    13. If the question cannot be answered using the provided schema,
-        return a safe SELECT query only if possible; otherwise return:
+    13. If the question cannot be answered using the provided metadata,
+        return:
         SELECT 'Unable to answer from the available schema';
 
-    The relevant database schema will be provided separately along with
+    The relevant database metadata will be provided separately along with
     the user's question.
 
     Now convert the user's natural language question into the appropriate
     SQLite SQL query.
     """
 ]
-
 # ==========================================
 # Streamlit Page Configuration
 # ==========================================
@@ -280,7 +505,8 @@ prompt = [
 st.set_page_config(
     page_title="Text-to-SQL AI",
     page_icon="🧠",
-    layout="centered"
+    layout="wide",
+    initial_sidebar_state="collapsed"
 )
 
 
@@ -288,31 +514,410 @@ st.set_page_config(
 # Custom CSS
 # ==========================================
 
-st.markdown(
-    """
-    <style>
+st.markdown("""
+<style>
 
-    .main {
-        padding-top: 2rem;
-    }
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
 
-    .title {
-        text-align: center;
-        font-size: 42px;
-        font-weight: 700;
-        margin-bottom: 5px;
-    }
+/* ==========================================
+   GLOBAL APP
+   ========================================== */
 
-    .subtitle {
-        text-align: center;
-        font-size: 18px;
-        margin-bottom: 30px;
-    }
+.stApp {
 
-    </style>
-    """,
-    unsafe_allow_html=True
-)
+    background:
+        radial-gradient(
+            circle at 10% 10%,
+            rgba(124, 58, 237, 0.22),
+            transparent 30%
+        ),
+        radial-gradient(
+            circle at 90% 20%,
+            rgba(6, 182, 212, 0.18),
+            transparent 30%
+        ),
+        radial-gradient(
+            circle at 50% 100%,
+            rgba(168, 85, 247, 0.14),
+            transparent 35%
+        ),
+        #070816;
+
+    color: #f8fafc;
+
+    font-family: 'Inter', sans-serif;
+}
+
+
+/* ==========================================
+   MAIN CONTAINER
+   ========================================== */
+
+.block-container {
+
+    max-width: 1100px;
+
+    padding-top: 3rem;
+    padding-bottom: 4rem;
+}
+
+
+/* ==========================================
+   TITLE
+   ========================================== */
+
+.title {
+
+    text-align: center;
+
+    font-size: 56px;
+
+    font-weight: 800;
+
+    letter-spacing: -1.5px;
+
+    background:
+        linear-gradient(
+            90deg,
+            #a78bfa,
+            #22d3ee,
+            #c084fc
+        );
+
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+
+    margin-bottom: 8px;
+
+    text-shadow:
+        0 0 30px rgba(139, 92, 246, 0.20);
+}
+
+
+/* ==========================================
+   SUBTITLE
+   ========================================== */
+
+.subtitle {
+
+    text-align: center;
+
+    font-size: 18px;
+
+    color: #94a3b8;
+
+    margin-bottom: 30px;
+
+    letter-spacing: 0.2px;
+}
+
+
+/* ==========================================
+   INFORMATION BOX
+   ========================================== */
+
+[data-testid="stAlert"] {
+
+    border-radius: 18px !important;
+
+    border: 1px solid rgba(139, 92, 246, 0.30) !important;
+
+    background:
+        linear-gradient(
+            135deg,
+            rgba(124, 58, 237, 0.14),
+            rgba(6, 182, 212, 0.08)
+        ) !important;
+
+    box-shadow:
+        0 10px 35px rgba(0, 0, 0, 0.20);
+
+}
+
+
+/* ==========================================
+   FILE UPLOADER
+   ========================================== */
+
+[data-testid="stFileUploader"] {
+
+    background:
+        rgba(255, 255, 255, 0.045);
+
+    border:
+        1px solid rgba(139, 92, 246, 0.35);
+
+    border-radius:
+        20px;
+
+    padding:
+        12px;
+
+    box-shadow:
+        0 10px 40px rgba(0, 0, 0, 0.25),
+        inset 0 1px 0 rgba(255, 255, 255, 0.05);
+}
+
+
+/* ==========================================
+   TEXT INPUT
+   ========================================== */
+
+[data-testid="stTextInput"] input {
+
+    background:
+        rgba(255, 255, 255, 0.055) !important;
+
+    color:
+        #ffffff !important;
+
+    border:
+        1px solid rgba(139, 92, 246, 0.35) !important;
+
+    border-radius:
+        14px !important;
+
+    padding:
+        15px 18px !important;
+
+    font-size:
+        16px !important;
+
+    transition:
+        all 0.25s ease;
+}
+
+
+[data-testid="stTextInput"] input:focus {
+
+    border-color:
+        #8b5cf6 !important;
+
+    box-shadow:
+        0 0 0 2px rgba(139, 92, 246, 0.15),
+        0 0 25px rgba(139, 92, 246, 0.25);
+}
+
+
+/* ==========================================
+   BUTTONS
+   ========================================== */
+
+.stButton > button {
+
+    width:
+        100%;
+
+    border-radius:
+        14px;
+
+    border:
+        1px solid rgba(139, 92, 246, 0.50);
+
+    background:
+        linear-gradient(
+            135deg,
+            #7c3aed,
+            #06b6d4
+        );
+
+    color:
+        #ffffff;
+
+    font-weight:
+        700;
+
+    padding:
+        12px 20px;
+
+    transition:
+        transform 0.2s ease,
+        box-shadow 0.2s ease;
+}
+
+
+.stButton > button:hover {
+
+    transform:
+        translateY(-2px);
+
+    box-shadow:
+        0 10px 30px rgba(124, 58, 237, 0.35),
+        0 0 25px rgba(6, 182, 212, 0.20);
+}
+
+
+/* ==========================================
+   EXPANDERS
+   ========================================== */
+
+[data-testid="stExpander"] {
+
+    background:
+        rgba(255, 255, 255, 0.035);
+
+    border:
+        1px solid rgba(139, 92, 246, 0.25);
+
+    border-radius:
+        18px;
+
+    margin-bottom:
+        10px;
+
+    box-shadow:
+        0 8px 30px rgba(0, 0, 0, 0.18);
+}
+
+
+/* ==========================================
+   CODE BLOCKS
+   ========================================== */
+
+pre {
+
+    background:
+        linear-gradient(
+            135deg,
+            rgba(15, 23, 42, 0.95),
+            rgba(30, 27, 75, 0.95)
+        ) !important;
+
+    border:
+        1px solid rgba(139, 92, 246, 0.25);
+
+    border-radius:
+        16px;
+
+    box-shadow:
+        0 8px 30px rgba(0, 0, 0, 0.25);
+}
+
+
+/* ==========================================
+   SUCCESS / WARNING BOXES
+   ========================================== */
+
+[data-testid="stAlert"] {
+
+    border-radius:
+        16px !important;
+
+    box-shadow:
+        0 8px 30px rgba(0, 0, 0, 0.18);
+}
+
+
+/* ==========================================
+   SCROLLBAR
+   ========================================== */
+
+::-webkit-scrollbar {
+
+    width:
+        8px;
+}
+
+
+::-webkit-scrollbar-track {
+
+    background:
+        #070816;
+}
+
+
+::-webkit-scrollbar-thumb {
+
+    background:
+        linear-gradient(
+            #7c3aed,
+            #06b6d4
+        );
+
+    border-radius:
+        10px;
+}
+
+
+/* ==========================================
+   BACKGROUND GLOW
+   ========================================== */
+
+.stApp::before {
+
+    content:
+        "";
+
+    position:
+        fixed;
+
+    width:
+        500px;
+
+    height:
+        500px;
+
+    top:
+        -250px;
+
+    left:
+        -200px;
+
+    background:
+        rgba(124, 58, 237, 0.12);
+
+    filter:
+        blur(100px);
+
+    border-radius:
+        50%;
+
+    pointer-events:
+        none;
+
+    z-index:
+        0;
+}
+
+
+.stApp::after {
+
+    content:
+        "";
+
+    position:
+        fixed;
+
+    width:
+        450px;
+
+    height:
+        450px;
+
+    bottom:
+        -250px;
+
+    right:
+        -150px;
+
+    background:
+        rgba(6, 182, 212, 0.10);
+
+    filter:
+        blur(100px);
+
+    border-radius:
+        50%;
+
+    pointer-events:
+        none;
+
+    z-index:
+        0;
+}
+
+</style>
+""", unsafe_allow_html=True)
 
 
 # ==========================================
@@ -326,23 +931,112 @@ st.markdown(
 
 st.markdown(
     '<div class="subtitle">'
-    'Ask questions about your student database in plain English'
+    'Talk to your database using plain English'
     '</div>',
     unsafe_allow_html=True
 )
-
 
 # ==========================================
 # Information Box
 # ==========================================
 
 st.info(
-    "💡 Try questions like: "
-    "'Show all students in Data Science' or "
-    "'Who scored more than 80 marks?'"
+    "💡 Try asking: "
+    "\"Show all students in Data Science\"  •  "
+    "\"Who scored more than 80 marks?\"  •  "
+    "\"What is the average marks?\""
+)
+# ==========================================
+# Database Upload
+# ==========================================
+
+st.subheader("📁 Upload Your SQLite Database")
+
+uploaded_db = st.file_uploader(
+    "Upload a SQLite database",
+    type=["db", "sqlite", "sqlite3"]
 )
 
+# ==========================================
+# Uploaded Database State
+# ==========================================
 
+uploaded_metadata_collection = None
+database_path = None
+
+if uploaded_db is not None:
+
+    database_path = "uploaded_database.db"
+    uploaded_metadata_collection = get_uploaded_metadata_collection(
+    database_path
+)
+
+    with open(database_path, "wb") as f:
+        f.write(uploaded_db.getbuffer())
+
+    st.success(
+        f"Database uploaded: {uploaded_db.name}"
+    )
+
+    # Analyze uploaded database
+    uploaded_metadata = build_uploaded_database_metadata(
+        database_path
+    )
+
+    uploaded_documents = create_uploaded_metadata_documents(
+        uploaded_metadata
+    )
+
+    st.subheader("🔍 Database Metadata")
+
+    st.write(
+        f"Tables discovered: {len(uploaded_metadata)}"
+    )
+
+    for document in uploaded_documents:
+
+        with st.expander(
+            f"📋 {document['table_name']}"
+        ):
+
+            st.code(
+                document["text"]
+            )
+
+    # Create database-specific collection
+    uploaded_metadata_collection = get_uploaded_metadata_collection(
+        database_path
+    )
+
+    for document in uploaded_documents:
+
+        uploaded_metadata_collection.upsert(
+            ids=[document["table_name"]],
+            documents=[document["text"]],
+            metadatas=[
+                {
+                    "table_name": document["table_name"]
+                }
+            ]
+        )
+
+    st.success(
+        "Database metadata indexed successfully."
+    )
+
+    print("\n========== UPLOADED DATABASE RAG ==========")
+
+    print(
+        "Collection:",
+        uploaded_metadata_collection.name
+    )
+
+    print(
+        "Documents:",
+        uploaded_metadata_collection.count()
+    )
+
+    print("===========================================\n")
 # ==========================================
 # User Input
 # ==========================================
@@ -372,13 +1066,21 @@ if submit:
 
     if not question.strip():
 
-        st.warning("⚠️ Please enter a question first.")
+        st.warning(
+            "⚠️ Please enter a question first."
+        )
+
+    elif uploaded_metadata_collection is None:
+
+        st.warning(
+            "⚠️ Please upload a SQLite database first."
+        )
 
     else:
 
-        # --------------------------------------
-        # Generate SQL using Gemini
-        # --------------------------------------
+        # ==========================================
+        # Generate SQL
+        # ==========================================
 
         with st.spinner("🤖 Generating SQL query..."):
 
@@ -386,8 +1088,12 @@ if submit:
 
                 response = get_gemini_response(
                     question,
-                    prompt
+                    prompt,
+                    uploaded_metadata_collection
                 )
+                print("\n========== GENERATED SQL ==========")
+                print(response)
+                print("===================================\n")
 
             except Exception as e:
 
@@ -446,9 +1152,9 @@ if submit:
             try:
 
                 data = read_sql_query(
-                    response,
-                    "student.db"
-                )
+    response,
+    database_path
+)
 
             except Exception as e:
 

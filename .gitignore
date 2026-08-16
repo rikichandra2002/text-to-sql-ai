@@ -16,3 +16,7 @@ chroma_db/
 
 # IDE files
 .vscode/
+
+# Uploaded / temporary databases
+uploaded_database.db
+company.db
