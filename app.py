@@ -962,7 +962,7 @@ if uploaded_db is not None:
 
     database_path = "uploaded_database.db"
     uploaded_metadata_collection = get_uploaded_metadata_collection(
-    database_path
+    uploaded_db.getvalue()
 )
 
     with open(database_path, "wb") as f:
