@@ -562,7 +562,21 @@ prompt = [
     13. If the question cannot be answered using the provided metadata,
         return:
         SELECT 'Unable to answer from the available schema';
+    14. Use the table descriptions, keywords, aliases, and foreign-key
+    relationships provided in the metadata to interpret the user's
+    natural-language terminology.
 
+15. If the user says "students", look for a table whose metadata
+    describes student records.
+
+16. If the user asks for "first 10", use LIMIT 10.
+
+17. If the question requires multiple tables, use the foreign-key
+    relationships provided in the metadata to construct the JOIN.
+
+18. Do not return the fallback response merely because the table
+    names are different from the words used by the user.
+    
     The relevant database metadata will be provided separately along with
     the user's question.
 
