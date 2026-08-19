@@ -39,13 +39,7 @@ metadata_collection = chroma_client.get_or_create_collection(
 # Get Metadata Collection for Uploaded DB
 # ==========================================
 
-def get_uploaded_metadata_collection(database_path):
-
-    # Read database file
-    with open(database_path, "rb") as f:
-        database_bytes = f.read()
-
-    # Create a unique hash for this database
+def get_uploaded_metadata_collection(database_bytes):
     database_hash = hashlib.md5(
         database_bytes
     ).hexdigest()[:12]
@@ -1005,8 +999,8 @@ if uploaded_db is not None:
 
     # Create database-specific collection
     uploaded_metadata_collection = get_uploaded_metadata_collection(
-        database_path
-    )
+    uploaded_db.getvalue()
+)
 
     for document in uploaded_documents:
 
