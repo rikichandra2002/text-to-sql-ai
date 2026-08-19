@@ -272,6 +272,76 @@ def build_uploaded_database_metadata(db):
         """
     ).fetchall()
 
+    # Semantic aliases for the uploaded student database
+    table_aliases = {
+        "togrenciler": [
+            "student",
+            "students",
+            "student records",
+            "student information",
+            "learners",
+            "pupils"
+        ],
+        "tdersler": [
+            "course",
+            "courses",
+            "subjects",
+            "classes",
+            "lessons"
+        ],
+        "tbolumler": [
+            "department",
+            "departments",
+            "branch",
+            "academic department"
+        ],
+        "tfakulteler": [
+            "faculty",
+            "faculties",
+            "school",
+            "college"
+        ],
+        "tkullanicilar": [
+            "user",
+            "users",
+            "people",
+            "persons",
+            "user records"
+        ],
+        "tiller": [
+            "city",
+            "cities",
+            "province",
+            "provinces"
+        ],
+        "tilceler": [
+            "district",
+            "districts",
+            "county",
+            "counties"
+        ],
+        "tkangruplari": [
+            "blood group",
+            "blood groups",
+            "blood type",
+            "blood types"
+        ],
+        "tdersialanogrenciler": [
+            "student courses",
+            "students taking courses",
+            "course enrollments",
+            "enrollments",
+            "student enrollment"
+        ],
+        "tyazokuluucretleri": [
+            "summer school",
+            "summer school fees",
+            "school fees",
+            "tuition fees",
+            "summer course fees"
+        ]
+    }
+
     metadata = {}
 
     for table in tables:
@@ -282,15 +352,24 @@ def build_uploaded_database_metadata(db):
             f"PRAGMA table_info('{table_name}')"
         ).fetchall()
 
+        normalized_table_name = table_name.lower()
+
         table_metadata = {
             "table_name": table_name,
             "description": "",
             "keywords": [
-                table_name.lower()
+                normalized_table_name
             ],
             "columns": {},
             "foreign_keys": []
         }
+
+        # Add semantic aliases
+        if normalized_table_name in table_aliases:
+
+            table_metadata["keywords"].extend(
+                table_aliases[normalized_table_name]
+            )
 
         # Column metadata
         for column in columns:
@@ -326,7 +405,6 @@ def build_uploaded_database_metadata(db):
     conn.close()
 
     return metadata
-
 # ==========================================
 # Create Metadata Documents
 # ==========================================
